@@ -1,104 +1,144 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"golang-fga/database"
-	"golang-fga/models"
+	"strconv"
+	"time"
 
+	"github.com/gin-gonic/gin"
+	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
 
-func main() {
-	database.StartDB()
-	// createOrder("kazuha")
-	// getOrderById(1)
-	getAllOrders()
-	// updateOrderById(1, "childe")
-	// deleteOrderById(2)
+// Define models
+type Order struct {
+	ID           uint      `gorm:"primaryKey"`
+	CustomerName string    `json:"customerName"`
+	OrderedAt    time.Time `json:"orderedAt"`
+	Items        []Item    `json:"items" gorm:"foreignKey:OrderID"`
 }
 
-func createOrder(name string) {
-	db := database.GetDB()
+type Item struct {
+	ID          uint   `gorm:"primaryKey"`
+	Code        string `json:"itemCode"`
+	Description string `json:"description"`
+	Quantity    uint   `json:"quantity"`
+	OrderID     uint   `json:"-"`
+}
 
-	order := models.Order{
-		CustomerName: name,
+var (
+	db *gorm.DB
+)
+
+func main() {
+	// Connect to the database
+	dsn := "host=localhost user=postgres password=yeay123 dbname=postgres port=5432 sslmode=disable"
+	var err error
+	db, err = gorm.Open(postgres.Open(dsn), &gorm.Config{})
+	if err != nil {
+		panic("Failed to connect to database!")
 	}
 
-	err := db.Debug().Create(&order).Error
-	if err != nil {
-		fmt.Println("Failed to create new order, err:", err)
+	r := gin.Default()
+
+	// Define routes
+	r.POST("/orders", createOrder)
+	r.GET("/orders", getOrders)
+	r.PUT("/orders/:id", updateOrder)
+	r.DELETE("/orders/:id", deleteOrder)
+
+	r.Run(":8080")
+}
+
+// Handlers
+func createOrder(c *gin.Context) {
+	var orderData Order
+
+	if err := c.ShouldBindJSON(&orderData); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	fmt.Println("Success to create new order:", order)
+	db.Create(&orderData)
+
+	c.JSON(201, orderData)
 }
 
-func getAllOrders() {
-    db := database.GetDB()
+func getOrders(c *gin.Context) {
+	var orders []Order
+	db.Preload("Items").Find(&orders)
 
-    var orders []models.Order
-
-    err := db.Debug().Order("id").Preload("Items").Find(&orders).Error
-    if err != nil {
-        fmt.Println("Failed to fetch orders, err:", err)
-        return
-    }
-
-	// convert to JSON
-    ordersJSON, err := json.Marshal(orders)
-    if err != nil {
-        fmt.Println("Failed to marshal orders to JSON, err:", err)
-        return
-    }
-
-    fmt.Println("Orders Data:", string(ordersJSON))
+	c.JSON(200, orders)
 }
 
-func getOrderById(id uint) {
-	db := database.GetDB()
+func updateOrder(c *gin.Context) {
+	var orderData Order
+	id := c.Param("id")
 
-	order := models.Order{}
+	if err := db.Preload("Items").First(&orderData, id).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Record not found!"})
+		return
+	}
 
-	err := db.Debug().First(&order, "id=?", id).Error
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			fmt.Println("Order data not found")
-			return
+	var newData struct {
+		OrderedAt    time.Time `json:"orderedAt"`
+		CustomerName string    `json:"customerName"`
+		Items        []struct {
+			ID          uint   `json:"id"`
+			ItemCode    string `json:"itemCode"`
+			Description string `json:"description"`
+			Quantity    uint   `json:"quantity"`
+		} `json:"items"`
+	}
+
+	if err := c.ShouldBindJSON(&newData); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	orderData.OrderedAt = newData.OrderedAt
+	orderData.CustomerName = newData.CustomerName
+
+	for _, newItem := range newData.Items {
+		existingItem := Item{
+			ID:      newItem.ID,
+			OrderID: orderData.ID,
+		}
+		if err := db.First(&existingItem).Error; err != nil {
+			continue
 		}
 
-		fmt.Println("Failed to find order data, err:", err)
-		return
+		existingItem.Code = newItem.ItemCode
+		existingItem.Description = newItem.Description
+		existingItem.Quantity = newItem.Quantity
+		db.Save(&existingItem)
 	}
 
-	fmt.Printf("Order data: %+v\n", order)
+	db.Save(&orderData)
+
+	c.JSON(200, newData)
 }
 
-func updateOrderById(id uint, name string) {
-	db := database.GetDB()
-
-	order := models.Order{}
-
-	err := db.Model(&order).Where("id=?", id).Updates(models.Order{CustomerName: name}).Error
+func deleteOrder(c *gin.Context) {
+	idStr := c.Param("id")
+	id, err := strconv.Atoi(idStr)
 	if err != nil {
-		fmt.Println("Failed to update order data, err:", err)
+		c.JSON(400, gin.H{"error": "Invalid ID format"})
 		return
 	}
 
-	fmt.Printf("Success to update order data: %+v\n", order)
-}
+	order := &Order{
+		ID: uint(id),
+	}
 
-func deleteOrderById(id uint) {
-	db := database.GetDB()
-
-	order := models.Order{}
-
-	err := db.Where("id=?", id).Delete(&order).Error
-	if err != nil {
-		fmt.Println("Failed to delete order, err:", err)
+	if err := db.First(order).Error; err != nil {
+		c.JSON(404, gin.H{"error": "Record not found!"})
 		return
 	}
 
-	fmt.Printf("Order with id %d has been deleted", id)
+	if err := db.Delete(order).Error; err != nil {
+		c.JSON(500, gin.H{"error": "Failed delete data!"})
+		return
+	}
+
+	c.JSON(200, gin.H{"message": "Success delete"})
 }
